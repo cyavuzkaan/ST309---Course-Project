@@ -1,0 +1,868 @@
+---
+title: "ST309_Project"
+output: html_document
+date: "2023-12-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Libraries
+
+```{r}
+rm(list=ls())
+library(plotly)
+library(ROCR)
+library(readr); library(dplyr); library(tidyr); library(ggplot2)
+library(rmarkdown)
+library(GGally)
+library(tree)
+library(DataExplorer)
+library(factoextra)
+library(randomForest)
+library(clValid)
+```
+
+# 1. Data Preparation and Cleaning
+
+## Load Data
+
+The data set is unstructured and we want to import data into a tidy format (i.e. dataframe)
+
+```{r}
+# To input this unstructured file into R we use read_delim 
+Customers <- read_delim("marketing_campaign.csv", delim = "\t")
+
+# To show # of observations and features in this data set
+dim(Customers)
+```
+
+Now we have a tidy data set with each feature forming a column and each value having its own cell
+
+## Data Cleansing
+
+### Basic examination of the dataset
+
+Column names:
+
+```{r}
+names(Customers)
+```
+
+### Variables in the dataset
+
+#### a. Customer information
+
+-   Year_Birth: Customer's birth year
+
+-   Education: Customer's education level
+
+-   Marital_Status: Customer's marital status
+
+-   Income: Customer's yearly household income
+
+-   Kidhome: Number of children in customer's household
+
+-   Teenhome: Number of teenagers in customer's household
+
+-   Dt_Customer: Date of customer's enrollment with the company
+
+-   Complain: if the customer complained in the last 2 years
+
+#### b. Amount spent on each category
+
+-   MntWines: Amount spent on wine in last 2 years
+
+-   MntFruits: Amount spent on fruits in last 2 years
+
+-   MntMeatProducts: Amount spent on meat in last 2 years
+
+-   MntFishProducts: Amount spent on fish in last 2 years
+
+-   MntSweetProducts: Amount spent on sweets in last 2 years
+
+-   MntGoldProds: Amount spent on gold in last 2 years
+
+#### c. Places where customers make the purchase
+
+-   NumWebPurchases: Number of purchases made through the company's website
+
+-   NumCatalogPurchases: Number of purchases made using a catalog
+
+-   NumStorePurchases: Number of purchases made directly in stores
+
+-   NumWebVisitsMonth: Number of visits to company's website in the last month
+
+#### d. Promotion activities response
+
+-   NumDealsPurchases: Number of purchases made with a discount
+
+-   AcceptedCmp1: 1 if customer accepted the offer in the 1st campaign, 0 otherwise
+
+-   AcceptedCmp2: 1 if customer accepted the offer in the 2nd campaign, 0 otherwise
+
+-   AcceptedCmp3: 1 if customer accepted the offer in the 3rd campaign, 0 otherwise
+
+-   AcceptedCmp4: 1 if customer accepted the offer in the 4th campaign, 0 otherwise
+
+-   AcceptedCmp5: 1 if customer accepted the offer in the 5th campaign, 0 otherwise
+
+-   Response: 1 if customer accepted the offer in the last campaign, 0 otherwise
+
+### Unique values in each feature
+
+```{r}
+nunique <- function(x) length(unique(x))
+nunique_counts <- sapply(Customers, nunique)
+nunique_counts
+```
+
+Summary statistics:
+
+```{r}
+summary(Customers)
+```
+
+### Missing Values
+
+```{r}
+Customers <- na.omit(Customers)
+plot_missing(Customers)
+```
+
+There are 24 observations dropped in the data set because of missing values.
+
+### Duplicate Values
+
+Check if there are duplicated data on the same customer characterised by their ID.
+
+```{r}
+duplicates <- Customers$ID[duplicated(Customers$ID)]
+```
+
+No duplicates found.
+
+### Errors and Outliers
+
+Based on the outliers found in the summary statistics, we will examine
+
+```{r}
+attach(Customers)
+par(mfrow = c(1, 2))
+hist(2021-Customers$Year_Birth)
+hist(Income)
+```
+
+Based on the histogram plots, we can see the majority of individuals are aged below 80 and have an income level below 100,000. Hence we drop the unusual values.
+
+```{r}
+Customers1 <- subset(Customers, 2021-Customers$Year_Birth < 80 & Income < 100000)
+```
+
+This drops another 24 observations.
+
+### Feature Engineering/Data Transformation
+
+```{r}
+# Age category for each customer
+Customers1$Age <- 2021 - Customers1$Year_Birth
+Customers1$AgeCategory <- cut(Customers1$Age, c(0, 17, 20, 30, 40, Inf), c('<18', '18-20', '21-30', '31-40', '>40')) #cut into age groups
+
+# Number of Children
+Customers1$NumChildren <- Customers1$Kidhome + Customers1$Teenhome
+
+# Total spending
+Customers1$Spending <- Customers1$MntWines + Customers1$MntFruits + Customers1$MntMeatProducts + Customers1$MntFishProducts + Customers1$MntSweetProducts + Customers1$MntGoldProds
+
+# Log transformation of highly-skewed spending variables
+Customers1 <- Customers1 %>%
+  mutate(
+    log_Wines = log(1+MntWines),
+    log_Fruits = log(1+MntFruits),
+    log_MeatProducts = log(1+MntMeatProducts),
+    log_FishProducts = log(1+MntFishProducts),
+    log_SweetProducts = log(1+MntSweetProducts),
+    log_GoldProds = log(1+MntGoldProds),
+    log_Spending = log(1+Spending) 
+  )
+
+# Relationship
+Customers1$Relationship <- ifelse(Customers1$Marital_Status %in% c("Married", "Together"), 1, 0)
+Customers1$Relationship <- factor(Customers1$Relationship, levels = c(0, 1), labels = c("Not Partnered", "Partnered"))
+
+# Education
+Education <- c(Basic = "Bachelors", '2n Cycle' = "Bachelors", Graduation = "Graduate", Master = "Masters", PhD = "PhD")
+Customers1$Education <- as.character(Education[Customers1$Education])
+Customers1$Education <- factor(Customers1$Education)
+
+# Number of years customers joined 
+Dt_Customer <- as.Date(Customers1$Dt_Customer, format = "%d-%m-%Y")
+Year_Customer <- as.numeric(format(Dt_Customer, "%Y"))
+Customers1$YearsJoined <- 2021 - Year_Customer
+
+# Number of accepted campaigns out of 6 in total 
+Customers1$TotalAcceptedCmp <- Customers1$AcceptedCmp1 + Customers1$AcceptedCmp2 + Customers1$AcceptedCmp3 + Customers1$AcceptedCmp4 + Customers1$AcceptedCmp5 + Customers1$Response
+
+# Remove redundant columns
+Customers1 <- subset(Customers1, select = -c(ID, Z_CostContact, Z_Revenue, Year_Birth, Marital_Status, Dt_Customer, Teenhome, Kidhome))
+```
+
+```{r}
+# Checking any outliers
+par(mfrow = c(1, 4))
+boxplot(Customers1$Income, main = "Income") 
+boxplot(Customers1$Age, main = "Age") 
+boxplot(Customers1$Spending, main = "Spent")
+boxplot(Customers1$NumChildren, main = "NumChildren")
+
+```
+
+We found missing values for 'income', and abnormal maximum values for 'income' and minimum values for 'age' (since the data set was created in 2021, an individual born in the year 1893 would have exceeded 120 years old).
+
+The distribution for amount spent on aggregate/individual category is rightly skewed (mean \>\> median), indicating some excessive high consumption level by a small proportion of individuals.
+
+## 2. Data Pre-processing
+
+Convert all variables into numerical using label encoding.
+
+```{r}
+# Examine data types of the columns 
+str(Customers1)
+
+# Identify categorical columns
+categorical_cols <- sapply(Customers1, is.factor)
+
+# Apply label encoding to categorical columns
+Customers1[categorical_cols] <- lapply(Customers1[categorical_cols], as.numeric)
+```
+
+Subset the dataframe used for PCA and modelling - remove highly correlated variables
+
+```{r}
+Customers2 <- subset(Customers1, select = -c(Spending,MntWines,MntFruits,MntMeatProducts,MntFishProducts,MntSweetProducts,MntGoldProds,AcceptedCmp1,AcceptedCmp2,AcceptedCmp3,AcceptedCmp4,AcceptedCmp5,Complain,Response, AgeCategory))
+
+```
+
+When the data distribution is skewed, data transofrmation is commonly used prior to applying PCA.
+
+## 3. Data Analysis
+
+### EDA - Correlation Matrix
+
+Pick out on some key features for correlation analysis.
+
+```{r}
+plot_correlation(Customers1)
+```
+
+```{r}
+plot_histogram(Customers1)
+```
+
+```{r}
+plot_qq(Customers1)
+```
+
+### PCA
+
+Now the columns of the data set contain the following variables.
+
+```{r}
+names(Customers2)
+```
+
+We examine the mean and variances of different variables
+
+```{r}
+apply(Customers2, 2, mean)
+```
+
+```{r}
+apply(Customers2, 2, var)
+```
+
+Standardisation
+
+```{r}
+PCA <- prcomp(x = Customers2, scale = TRUE)
+Table_PCA <- rbind(PCA$rotation, summary(PCA)$importance)
+knitr::kable(Table_PCA, digits = 4, align = 'c')
+```
+
+```{r}
+par(mfrow=c(1,1))
+plot(Table_PCA['Proportion of Variance',], type = 'o', lwd = 5, col = 'blue', main = 'PC proportions of total variance', xlab = 'PC', ylab = 'Proportion of variance', axes = FALSE)
+axis(1, 1:22)
+axis(2)
+```
+
+Subset data based on chosen principle components
+
+```{r}
+nf <- 3
+Customers3 <- as.data.frame(PCA$x[, 1:nf])
+Customers3
+```
+
+### Clustering
+
+#### Elbow method for optimal number of clusters
+
+```{r}
+# Elbow method
+fviz_nbclust(Customers3, hcut, method = "wss") +
+geom_vline(xintercept = 4, linetype = 2) +
+labs(subtitle = "Elbow method")
+
+# Silhouette method
+fviz_nbclust(Customers3, hcut, method = "silhouette") + labs(subtitle = "Silhouette method")
+
+# # Gap statistic
+# set.seed(123)
+# fviz_nbclust(Customers3, hcut, nstart = 25, method = "gap_stat", nboot = 50)
+# + labs(subtitle = "Gap statistic method")
+```
+
+The Elbow and Silhouette methods give us 4 and 2 respectively as the optimal number of clusters for hierarchical clustering.
+
+We select the cluster number = 3 based on that and also our intuition that 3 clusters give us a more balanced size for each cluster.
+
+We then do clustering on the selected principal components for de-noising the data
+
+#### Hierarchical Clustering (bottom-up agglomerative approach)
+
+-   Step 1: preparing the data
+
+-   Step 2: computing similarity information between every pair of objects in the data set
+
+-   Step 3: using linkage function to group objects into hierarchical cluster tree
+
+-   Step 4: determining where to cut the dendrogram into clusters
+
+Here we use the default Euclidean distance for our distance measure between objects. Then the linkage function takes the distance information and groups.
+
+We use Complete Linkage as it tends to produce more compact clusters that achieves our goal to group similar customers together while maintaining a clear distinction between different groups
+
+```{r}
+hc.complete = hclust(dist(Customers3), method = "complete")
+hc_complete = cutree(hc.complete, 3)
+table(hc_complete)
+```
+
+We do not want to use single linkage as it tends to produce long and loose clusters.
+
+Complete linkage is generally preferred (Alboukadel Kassambara Textbook)
+
+### Dendrogram plot
+
+```{r}
+# fviz_dend(hc.complete, k = 3,  # Cut in three groups
+#   cex = 0.5,  # Label size
+#   k_colors = c("blue", "red", "green"),
+#   color_labels_by_k = TRUE, # Colour labels by groups
+#   rect = TRUE, # Add rectangle around groups
+#   ylim = c(3,15)) # Zoom in the dendrogram
+```
+
+The higher the height of the fusion, the less similar the objects are.
+
+#### K-Means Clustering
+
+We do the k-means clustering to compare the clustering results we got from hierarchical clustering.
+
+```{r}
+set.seed(123)
+km.out = kmeans(Customers3, 3, nstart = 20)
+km.clusters = km.out$cluster
+km.clusters
+```
+
+Compare k-means and hc clusters
+
+```{r}
+table(km.clusters, hc_complete)
+hc.clusters = hc_complete
+```
+
+We selected 3 as the optimal clusters in HC, and then we pre-define 3 clusters for kmeans and generate the cluster result and to compare
+
+Based on this table: - All the customers in cluster 2 of km are in the hc cluster 1 - HC cluster 1 is somewhat similar to KM cluster 2 - HC cluster 2 is similar to KM cluster 1 - HC cluster 3 is somewhat similar to KM cluster 3
+
+We can verify in the result table below
+
+#### Cluster visualisation
+
+```{r}
+PC1 <- Customers3[,1]
+PC2 <- Customers3[,2]
+PC3 <- Customers3[,3]
+
+# Append the cluster result to our dataset
+Customers3["hcluster"] <- hc.clusters
+
+cluster_viz <- plot_ly(x = PC1, y = PC2, z = PC3, type = "scatter3d", mode = "markers",
+                marker = list(color = Customers3$hcluster, size = 5, opacity = 0.8)) 
+
+cluster_viz <- cluster_viz %>% layout(scene = list(xaxis = list(title = "PC1"),
+                             yaxis = list(title = "PC2"),
+                             zaxis = list(title = "PC3")))
+
+cluster_viz <- cluster_viz %>% add_markers()
+
+cluster_viz
+```
+
+Append the result to our original dataset indicating which cluster each customer belongs to.
+
+```{r}
+Customers1["kmcluster"] <- km.clusters
+Customers1["hcluster"] <- hc.clusters
+Customers1
+```
+
+## 4. Analysis and interpretation
+
+Hierarchical Clustering Summary statistics
+
+```{r}
+hcresult <- Customers1 %>%
+  group_by(hcluster) %>%
+  summarise_all(mean) %>%
+  t() %>%
+  round(2)
+hcresult
+```
+
+K-Means Summary Statistics
+
+```{r}
+kmresult <- Customers1 %>%
+  group_by(kmcluster) %>%
+  summarise_all(mean) %>%
+  t() %>%
+  round(2)
+kmresult
+```
+
+From this, we can safely use the clustering result from Hierarchical Clustering.
+
+#### Number of customers in each cluster
+
+```{r}
+barplot(table(hc_complete), main = "Number of customers in each cluster", xlab = "Clusters", ylab = "Counts")
+```
+
+#### Education level
+
+```{r}
+Customers1$Education <- as.factor(Customers1$Education) # change in categorical variable 
+ggplot(Customers1, aes(x = hcluster, fill = Education)) +
+  geom_bar(position = "fill") +
+  labs(title = "Bar plot of education by cluster", x = "hcluster", y = "proportion") 
+```
+
+Every cluster has the highest number of graduates, followed by PhDs, followed by Masters, followed by Bachelors students. Cluster 2 has a higher proportion of Bachelors students.
+
+#### Income level
+
+```{r}
+mean_result <- aggregate(data = Customers1, Income ~ hcluster, mean)
+sd_result <- aggregate(data = Customers1, Income ~ hcluster, sd)
+count_result <- table(Customers1$hcluster)
+
+# Combine mean, sd, and count into a single table
+combined_table <- merge(merge(mean_result, sd_result, by = "hcluster"), as.data.frame(count_result), by.x = "hcluster", by.y = "Var1", all.x = TRUE)
+
+# Rename the columns 
+colnames(combined_table) <- c("hcluster", "estimated_income", "sd_Income", "sample_count")
+
+#calculate the standard error
+combined_table$standard_error <- combined_table$sd_Income/ sqrt(combined_table$sample_count)
+
+#calculate the t_score using 95% confidence interval 
+alpha = 0.05
+degrees_of_freedom = combined_table$sample_count - 1
+combined_table$t_score = qt(p=alpha/2, df=degrees_of_freedom,lower.tail=F)
+
+#calculate the margin of error
+combined_table$margin_error <- combined_table$t_score * combined_table$standard_error
+
+#show the table result
+combined_table
+
+ggplot(combined_table, aes(x = estimated_income, y = reorder(hcluster, estimated_income))) + 
+  geom_errorbarh(aes(xmin = estimated_income - margin_error, xmax = estimated_income + margin_error)) + 
+  geom_point(size = 3, color = "darkgreen") + 
+  theme_minimal(base_size = 12.5) + 
+  labs(title = "Mean customer household income", 
+       subtitle = "For Each Hierarchial Cluster", 
+       x = "Income Estimate", 
+       y = "Cluster group")
+```
+
+Cluster 1: High income Cluster 2: Low income Cluster 3: Medium income
+
+#### Spending amount
+
+```{r}
+# Create a scatterplot
+spending_plot <- ggplot(Customers1, aes(x = Spending, y = Income, color = as.factor(hcluster))) +
+  geom_point() +
+  labs(title = "Income and Spending for each Cluster") +
+  theme_minimal()
+
+# Show the plot
+print(spending_plot)
+
+
+```
+
+Cluster 1 has the highest Marginal Propensity to Consume (MPC) Cluster 2 has the lowest MPC as shown by a vertical (inelastic) relationship between income and spending so we label them as a 'saver' Cluster 3 is in between.
+
+#### Spending patterns
+
+```{r}
+goods <- Customers1 %>%
+  select(MntWines, MntFruits, MntMeatProducts, MntFishProducts, MntSweetProducts, MntGoldProds, Spending, hcluster)
+
+sum_spending_by_commodity <- goods %>%
+  group_by(hcluster) %>%
+  summarise(across(c("MntWines", "MntFruits", "MntMeatProducts", "MntFishProducts", "MntSweetProducts", "MntGoldProds"), sum))
+
+spending_by_cluster <- goods %>%
+  group_by(hcluster) %>%
+  summarise(across(c("Spending"), sum))
+
+proportion <- sum_spending_by_commodity %>%
+  mutate(across(-1, ~./spending_by_cluster$Spending))
+
+library(gt)
+library(scales)
+
+spend_table <- proportion %>%
+  gt() %>%
+  data_color(
+    columns = c("MntWines", "MntFruits", "MntMeatProducts", "MntFishProducts", "MntSweetProducts", "MntGoldProds"),
+    colors = scales::col_numeric(
+      palette = "YlGn",
+      domain = NULL
+    ) 
+  )
+
+spend_table
+```
+
+All three clusters seem to spend the most on wine, and similar proportion for Fruits, Fish and Sweets. Cluster 1 seem to spend a higher proportion on Meat Cluster 2 seem to spend a higher proportion on Gold Cluster 3 seem to spend a higher proportion on Wine
+
+#### Campaigns performance
+
+```{r}
+campaigns_plot <- ggplot(Customers1, aes(x = factor(TotalAcceptedCmp), fill = as.factor(hcluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Count Of Promotion Accepted",
+       x = "Number Of Total Accepted Promotions") +
+  theme_minimal()
+
+campaigns_plot
+
+```
+
+Cluster 1 accepts propomotions more, but cluster 1 is inherently bigger than the other clusters, and because very few customers accepted promotions and no one accepted all 6 campaigns. Probably a better personalised and targeted campaigns are needed for each cluster to boost acceptance rate and hence sales.
+
+#### Deals purchased
+
+```{r}
+deals_plot <- ggplot(Customers1, aes(x = NumDealsPurchases, fill = as.factor(hcluster))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Count of Deals Puchased",
+       x = "Number Of Deals Purhcased") +
+  theme_minimal()
+
+deals_plot
+
+```
+
+Cluster 3 is the one that is most responsive to deals.
+
+#### Sales channels
+
+```{r}
+sum_spending_by_commodity <- Customers1 %>%
+  group_by(hcluster) %>%
+  summarise(across(c("NumWebPurchases", "NumCatalogPurchases", "NumStorePurchases"), mean))
+
+purchases_ct <- sum_spending_by_commodity %>% gather(key = Purchases, value = Value, NumWebPurchases:NumStorePurchases)
+
+ggplot(purchases_ct, aes(x = factor(hcluster), y = Value, fill = Purchases)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Cluster Groups", y = "Average Counts", title = "Grouped Bar Chart") +
+  scale_fill_manual(values = c("NumWebPurchases" = "blue", "NumCatalogPurchases" = "green", "NumStorePurchases" = "red")) +
+  theme_minimal()
+
+```
+
+Compare within the group, Cluster 1 and 2 are the store goers whereas Cluster 3 shop more via web.
+
+## 5. Supervised classification problem
+
+Here we will try to use a supervised learning method.
+
+Here we would like to predict the 'Response' variable (1 if customer accepted the offer in the last campaign, 0 otherwise). Since the variable is binary, a linear regression model is not appropriate. Hence, we would use classification to classify the observation into one of the two categories.
+
+In this case, we will use the logistic regression model as a classifier, which models the probability of 'Response' belong to 0 or 1
+
+### Classifying the clusters
+
+To maintain the consistency of our analysis, we should use the same variables that we used in the clustering analysis.
+
+```{r}
+Customers2["hcluster"] <- hc.clusters
+
+Customers2 <- Customers2 %>% 
+  mutate( 
+    InCluster1 = as.factor(if_else(hcluster == 1, 1, 0)), 
+    InCluster2 = as.factor(if_else(hcluster == 2, 1, 0)), 
+    InCluster3 = as.factor(if_else(hcluster == 3, 1, 0))) 
+
+tree1.Customers = tree(formula = InCluster1~.-InCluster2-InCluster3-hcluster, data=Customers2) 
+tree2.Customers = tree(formula = InCluster2~.-InCluster1-InCluster3-hcluster, data=Customers2) 
+tree3.Customers = tree(formula = InCluster3~.-InCluster1-InCluster2-hcluster, data=Customers2) 
+
+plot(tree1.Customers) 
+text(tree1.Customers, pretty=1, cex = 0.7) 
+
+plot(tree2.Customers) 
+text(tree2.Customers, pretty=1, cex = 0.7) 
+
+plot(tree3.Customers) 
+text(tree3.Customers, pretty=1, cex = 0.7) 
+```
+
+This generates our cluster description for each cluster.
+
+Cluster 1: - High income + Low spending (fish) + High deal purchased - Low income + Low deal purchased + High web visits - Low income + Low deal purchased + Low meat spending - Low income + Low deal purchased + High meat spending + Low spending
+
+Cluster 2: high spending
+
+Cluster 3: - Low deal purchased + High web visits
+
+FINISH OFFF LATER!
+
+### Predict the response variable
+
+```{r}
+sum(Customers1$Response == 1)
+sum(Customers1$Response == 0)
+
+glm.fits = glm(Response ~ Education + Income + NumChildren + Recency + NumDealsPurchases + NumWebPurchases + NumStorePurchases + YearsJoined + Relationship + Age + Spending + TotalAcceptedCmp, data = Customers1, family = binomial)
+summary(glm.fits)
+```
+
+Based on the correlation matrix from EDA: We only included one spending, one campaign variable due to the potential problem of multicollinearity (corr\>0.8) We also excluded NumWebVisits, NumCatalogPurchases, AgeCategory
+
+We now remove the insignificant variables one by one
+
+```{r}
+glm.fits1 = glm(Response ~ Education + NumChildren + Recency + NumDealsPurchases + NumWebPurchases + NumStorePurchases + YearsJoined + Relationship + Age + Spending + TotalAcceptedCmp, data = Customers1, family = binomial)
+summary(glm.fits1)
+```
+
+```{r}
+glm.fits2 = glm(Response ~ Education + NumChildren + Recency + NumDealsPurchases + NumStorePurchases + YearsJoined + Relationship + Age + Spending + TotalAcceptedCmp, data = Customers1, family = binomial)
+summary(glm.fits2)
+```
+
+```{r}
+glm.fits3 = glm(Response ~ Education + NumChildren + Recency + NumDealsPurchases + NumStorePurchases + YearsJoined + Relationship + Spending + TotalAcceptedCmp, data = Customers1, family = binomial)
+summary(glm.fits3)
+```
+
+```{r}
+glm.fits4 = glm(Response ~ Education + NumChildren + Recency + NumDealsPurchases + NumStorePurchases + YearsJoined + Relationship + TotalAcceptedCmp, data = Customers1, family = binomial)
+summary(glm.fits4)
+```
+
+#### Predictions
+
+```{r}
+glm.probs = predict(glm.fits4, type = "response")
+glm.pred = rep(0, 2198)
+glm.pred[glm.probs > 0.5] = 1
+table(glm.pred, as.factor(Customers1$Response))
+
+mean(glm.pred == Customers1$Response)
+```
+
+Our logistic regression model correctly predicts the response variable 94.3% of the time.
+
+We now split into training and testing data to prevent overfitting
+
+```{r}
+set.seed(123)
+
+
+# Subset a dataframe with only response = 1 - 400
+Customers1_Response1 <- subset(Customers1, Response == 1)
+Customers1_Response0 <- subset(Customers1, Response == 0)
+dim(Customers1_Response1) #329 
+
+# We subset a dataframe with only response = 0 and then random sample into equal size - 1867 -> 467
+train0_ind <- sample(1:nrow(Customers1_Response0), nrow(Customers1_Response0)/4) #around 467
+train0 <- Customers1_Response0[train0_ind, ]
+
+# Merge 
+train1 <- rbind(Customers1_Response1, train0) #around 796 obs. 
+
+#extract the remaining observations as testing data
+test1 <- Customers1[setdiff(1:nrow(Customers1), rownames(train1)), ]
+
+glm.fits5 = glm(Response ~ Education + NumChildren + Recency + NumDealsPurchases + NumStorePurchases + YearsJoined + Relationship + TotalAcceptedCmp, data = train1, family = binomial)
+
+summary(glm.fits5)
+
+glm.probs2 = predict(glm.fits5, newdata = test1, type = "response")
+
+#a binary prediction based on a threshold of 0.5
+glm.pred2 <- ifelse(glm.probs2 > 0.5, 1, 0)
+
+# the confusion matrix
+table(glm.pred2, as.factor(test1$Response))
+
+mean(glm.pred2 == test1$Response)
+
+```
+
+## 6. Association Rule
+
+Here we want to use association rule to find out which type of customers are more active in certain channels, therefore helping the businesses target the right group of customers for promotion to increase return on investment on marketing.
+
+This analysis is complementary to the 'Response' prediction analysis above.
+
+```{r}
+library(arules)
+library(effects)
+library(arulesViz)
+```
+
+We need to transform every variable into categories for the apriori algorithm to work. We use characteristics data from customers.
+
+Extract the information that we are actually interested.
+
+(bobby) Question 1: income/spending on their shopping channels - business profit
+
+```{r}
+summary(Customers1$Income)
+CustomersAssoc1 <- Customers1[c("Income", "NumWebPurchases", "NumStorePurchases", "NumCatalogPurchases")]
+
+CustomersAssoc1$Income <- cut(
+  CustomersAssoc1$Income,
+  breaks = quantile(CustomersAssoc1$Income, c(0, 0.33, 0.66, 1)), 
+  labels = c("Low", "Medium", "High"),
+  include.lowest = TRUE
+)
+
+CustomersAssoc1$NumWebPurchases <- cut(
+  CustomersAssoc1$NumWebPurchases,
+  breaks = quantile(CustomersAssoc1$NumWebPurchases, c(0, 0.33, 0.66, 1)),
+  labels = c("Low", "Medium", "High"),
+  include.lowest = TRUE
+)
+
+CustomersAssoc1$NumStorePurchases <- cut(
+  CustomersAssoc1$NumStorePurchases,
+  breaks = quantile(CustomersAssoc1$NumStorePurchases, c(0, 0.33, 0.66, 1)),
+  labels = c("Low", "Medium", "High"),
+  include.lowest = TRUE
+)
+
+CustomersAssoc1$NumCatalogPurchases <- cut(
+  CustomersAssoc1$NumCatalogPurchases,
+  breaks = quantile(CustomersAssoc1$NumCatalogPurchases, c(0, 0.33, 0.66, 1)),
+  labels = c("Low", "Medium", "High"),
+  include.lowest = TRUE
+)
+
+summary(Customers1$NumCatalogPurchases)
+
+```
+
+```{r}
+rules1high <- apriori(CustomersAssoc1, parameter = list(support = 0.1, confidence = 0.2), appearance = list(lhs = "Income=High"))
+inspect(rules1high)
+
+rules1med <- apriori(CustomersAssoc1, parameter = list(support = 0.1, confidence = 0.2), appearance = list(lhs = "Income=Medium"))
+inspect(rules1med)
+
+rules1low <- apriori(CustomersAssoc1, parameter = list(support = 0.1, confidence = 0.2), appearance = list(lhs = "Income=Low"))
+inspect(rules1low)
+```
+
+High income group - stronger association with high catalog purchases and store purchases - we can give them printed copy of catalog for free
+
+Medium income group - some association seen with high web purchases as we found out from clustering analysis
+
+Low income group - high association with low purchases in each sales channel
+
+(erika) Question 2: high recency value = 0 on their shopping channels - customer retention
+
+```{r}
+CustomersAssoc2 <- Customers1[c("Recency" , "NumCatalogPurchases", "NumWebPurchases", "NumStorePurchases")]
+
+CustomersAssoc2$NumWebPurchases <- ifelse(CustomersAssoc2$NumWebPurchases < quantile(CustomersAssoc2$NumWebPurchases, 0.33), "Low",
+                            ifelse(CustomersAssoc2$NumWebPurchases < quantile(CustomersAssoc2$NumWebPurchases, 0.66), "Medium", "High"))  
+
+CustomersAssoc2$NumCatalogPurchases <- ifelse(CustomersAssoc2$NumCatalogPurchases < quantile(CustomersAssoc2$NumCatalogPurchases, 0.33), "Low", ifelse(CustomersAssoc2$NumCatalogPurchases < quantile(CustomersAssoc2$NumCatalogPurchases, 0.66), "Medium", "High"))
+
+CustomersAssoc2$NumStorePurchases <- ifelse(CustomersAssoc2$NumStorePurchases < quantile(CustomersAssoc2$NumStorePurchases, 0.33), "Low", ifelse(CustomersAssoc2$NumStorePurchases < quantile(CustomersAssoc2$NumStorePurchases, 0.66), "Medium", "High"))
+
+CustomersAssoc2$Recency <- ifelse(CustomersAssoc2$Recency < 20, "High", 
+                                  ifelse(CustomersAssoc2$Recency < 50, "Medium", "Low")) # high in terms of high value to the business and low in terms of low value to the business 
+
+```
+
+```{r}
+rules2high <- apriori(CustomersAssoc2, parameter = list(support = 0.1, confidence = 0.2), appearance = list(lhs = "Recency=High"))
+inspect(rules2high)
+
+rules2med <- apriori(CustomersAssoc2, parameter = list(support = 0.1, confidence = 0.2), appearance = list(lhs = "Recency=Medium"))
+inspect(rules2med)
+
+rules2low <- apriori(CustomersAssoc2, parameter = list(support = 0.1, confidence = 0.2), appearance = list(lhs = "Recency=Low"))
+inspect(rules2low)
+```
+
+(kaan) Question 3: age on their shopping channels
+
+```{r}
+
+
+
+```
+
+<!-- Question 4: num of children on product spending category  -->
+
+```{r}
+high_confidence_rules <- subset(rules, confidence > 0.8)
+sorted_rules <- sort(rules, by="lift")
+```
+
+```{r}
+plot(rules, method="graph")
+```
+
+```{r}
+quality <- quality(rules)
+print(quality)
+```
+
+```{r}
+quality(rules) <-interestMeasure(rules,measure=c("support","confidence","lift"),Customers2)
+print(quality(rules))
+```
+
+```{r}
+inspect(sort(rules, by = 'lift')[1:10]) 
+plot(rules, method = "graph",  
+     measure = "confidence", shading = "lift") 
+```
